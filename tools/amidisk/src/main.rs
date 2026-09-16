@@ -53,6 +53,8 @@ enum Command {
     Boot(commands::boot::Args),
     /// Create a directory on the volume.
     Makedir(commands::makedir::Args),
+    /// Create a hard or soft link on the volume.
+    Makelink(commands::makelink::Args),
     /// Write a host file (or, recursively, a directory) into the volume.
     Write(commands::write::Args),
     /// Delete a file or (with `--all`) a directory tree.
@@ -99,6 +101,7 @@ fn main() -> Result<()> {
         Command::Format(args) => commands::format::run(image, args),
         Command::Boot(args) => commands::boot::run(image, args),
         Command::Makedir(args) => commands::makedir::run(image, args),
+        Command::Makelink(args) => commands::makelink::run(image, args),
         Command::Write(args) => commands::write::run(image, args),
         Command::Delete(args) => commands::delete::run(image, args),
         Command::Protect(args) => commands::protect::run(image, args),

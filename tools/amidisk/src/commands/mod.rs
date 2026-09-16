@@ -16,6 +16,7 @@ pub mod format;
 pub mod info;
 pub mod list;
 pub mod makedir;
+pub mod makelink;
 pub mod pack;
 pub mod protect;
 pub mod read;

@@ -126,7 +126,18 @@ fn print_entry(vol: &mut Volume<FileDisk>, entry: &Entry, prefix: &str, long: bo
         format!("  ; {comment}")
     };
 
-    println!("{prot} {size:>10} {date}  {prefix}{name}{suffix}{comment}");
+    let target = match entry.kind {
+        EntryKind::SoftLink => {
+            let path = vol
+                .read_softlink(entry.lba)
+                .map_err(|e| anyhow::anyhow!("{e}"))
+                .with_context(|| format!("reading {name}'s soft link target"))?;
+            format!(" -> {}", display_name(&path))
+        }
+        _ => String::new(),
+    };
+
+    println!("{prot} {size:>10} {date}  {prefix}{name}{suffix}{target}{comment}");
     Ok(())
 }
 

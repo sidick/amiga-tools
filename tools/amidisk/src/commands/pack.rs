@@ -21,6 +21,19 @@
 //! With no `--size`, the smallest standard floppy the tree fits in is
 //! used, falling back to a doubling sequence of HDF sizes; `Populator`
 //! itself is the judge of "fits", via trial population.
+//!
+//! Links exist only in the sidecar (see `unpack`'s module documentation
+//! on why neither kind has a host filesystem entry to read back): a
+//! `slink` line becomes `Populator::create_softlink` inline, in the same
+//! per-directory pass as everything else, since it needs no target to
+//! already exist. A `hlink` line does need its target to exist first, so
+//! every hard link recorded anywhere in the sidecar is parked during the
+//! tree pass and created afterwards, once the whole tree -- and so every
+//! possible target -- has a block; its target ami-path is looked up
+//! against the paths recorded while populating, and a target missing
+//! from that map (never populated, e.g. because the sidecar's own `dir`/
+//! `file` line for it is missing) is an error naming the link, not a
+//! silent drop.
 
 use std::collections::HashMap;
 use std::fs;
@@ -32,7 +45,7 @@ use clap::Args as ClapArgs;
 
 use super::create::{ADF_SIZE, HD_SIZE};
 use super::display_name;
-use super::unpack::{self, MetaEntry};
+use super::unpack::{self, MetaEntry, MetaKind};
 use crate::disk::{FileDisk, DEFAULT_BLOCK_SIZE};
 
 #[derive(ClapArgs)]
@@ -139,7 +152,12 @@ pub fn run(image: &Path, args: Args) -> Result<()> {
             Err(e) => bail!("formatting a {size}-byte image: {e}"),
         };
         let root = pop.root_lba();
-        match populate_tree(&mut pop, root, &args.src_dir, &[], &by_parent) {
+        let mut created: HashMap<Vec<u8>, u64> = HashMap::new();
+        created.insert(Vec::new(), root);
+        let mut pending_hardlinks: Vec<PendingHardlink> = Vec::new();
+        let result = populate_tree(&mut pop, root, &args.src_dir, &[], &by_parent, &mut created, &mut pending_hardlinks)
+            .and_then(|()| resolve_hardlinks(&mut pop, &created, &pending_hardlinks));
+        match result {
             Ok(()) => {
                 built = Some(pop.finish().map_err(|e| anyhow!("{e}")).with_context(|| "finishing the volume".to_string())?);
                 break;
@@ -197,15 +215,34 @@ fn too_small_anyhow(e: &anyhow::Error) -> bool {
     })
 }
 
+/// A hard link recorded in the sidecar, parked until the whole tree has
+/// been populated and its target might exist (see the module
+/// documentation).
+struct PendingHardlink {
+    parent_lba: u64,
+    name: Vec<u8>,
+    protection: u32,
+    date: amiga_ffs::DateStamp,
+    comment: Vec<u8>,
+    target_path: Vec<u8>,
+    display: String,
+}
+
 /// Populate one directory, in the sidecar's original order reversed
 /// (see the module documentation), falling back to a sorted host
-/// listing for anything the sidecar does not mention.
+/// listing for anything the sidecar does not mention. `created` gains
+/// one entry per directory/file this call (or a recursive one) creates,
+/// keyed by its full ami-path -- what a hard link's target is resolved
+/// against once the whole tree is done. `pending_hardlinks` gains one
+/// entry per `hlink` line encountered.
 fn populate_tree(
     pop: &mut Populator<FileDisk>,
     dst_dir: u64,
     host_dir: &Path,
     ami_prefix: &[u8],
     by_parent: &HashMap<Vec<u8>, Vec<&MetaEntry>>,
+    created: &mut HashMap<Vec<u8>, u64>,
+    pending_hardlinks: &mut Vec<PendingHardlink>,
 ) -> Result<()> {
     let names: Vec<Vec<u8>> = if let Some(children) = by_parent.get(ami_prefix) {
         children.iter().rev().map(|m| unpack::last_component(&m.path).to_vec()).collect()
@@ -222,11 +259,37 @@ fn populate_tree(
     };
 
     for name in names {
-        let host_path = host_dir.join(display_name(&name));
         let ami_path = join_path(ami_prefix, &name);
         let ami_display = display_name(&ami_path);
-
         let sidecar_entry = by_parent.get(ami_prefix).and_then(|v| v.iter().find(|m| m.path == ami_path));
+
+        // Links live only in the sidecar; there is no host file to stat.
+        match sidecar_entry.map(|m| &m.kind) {
+            Some(MetaKind::SoftLink(target)) => {
+                let m = sidecar_entry.unwrap();
+                let meta = Metadata::new().protection(m.protection).date(m.date).comment(&m.comment);
+                pop.create_softlink(dst_dir, &name, &meta, target)
+                    .map_err(|e| anyhow!("{e}"))
+                    .with_context(|| format!("creating soft link {ami_display}"))?;
+                continue;
+            }
+            Some(MetaKind::HardLink(target_path)) => {
+                let m = sidecar_entry.unwrap();
+                pending_hardlinks.push(PendingHardlink {
+                    parent_lba: dst_dir,
+                    name: name.clone(),
+                    protection: m.protection,
+                    date: m.date,
+                    comment: m.comment.clone(),
+                    target_path: target_path.clone(),
+                    display: ami_display.clone(),
+                });
+                continue;
+            }
+            Some(MetaKind::Dir) | Some(MetaKind::File) | None => {}
+        }
+
+        let host_path = host_dir.join(display_name(&name));
         let md = fs::symlink_metadata(&host_path).with_context(|| format!("reading {}", host_path.display()))?;
         let (protection, date, comment) = match sidecar_entry {
             Some(m) => (m.protection, m.date, m.comment.clone()),
@@ -243,28 +306,49 @@ fn populate_tree(
                 .create_dir(dst_dir, &name, &meta)
                 .map_err(|e| anyhow!("{e}"))
                 .with_context(|| format!("creating directory {ami_display}"))?;
-            populate_tree(pop, child, &host_path, &ami_path, by_parent)?;
+            created.insert(ami_path.clone(), child);
+            populate_tree(pop, child, &host_path, &ami_path, by_parent, created, pending_hardlinks)?;
         } else if md.is_file() {
             let mut file = fs::File::open(&host_path).with_context(|| format!("opening {}", host_path.display()))?;
             let mut failure: Option<std::io::Error> = None;
-            pop.create_file_with(dst_dir, &name, &meta, |buf| {
-                use std::io::Read;
-                match file.read(buf) {
-                    Ok(n) => n,
-                    Err(e) => {
-                        failure.get_or_insert(e);
-                        0
+            let lba = pop
+                .create_file_with(dst_dir, &name, &meta, |buf| {
+                    use std::io::Read;
+                    match file.read(buf) {
+                        Ok(n) => n,
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                            0
+                        }
                     }
-                }
-            })
-            .map_err(|e| anyhow!("{e}"))
-            .with_context(|| format!("writing {ami_display}"))?;
+                })
+                .map_err(|e| anyhow!("{e}"))
+                .with_context(|| format!("writing {ami_display}"))?;
             if let Some(e) = failure {
                 return Err(e).with_context(|| format!("reading {}", host_path.display()));
             }
+            created.insert(ami_path.clone(), lba);
         } else {
             bail!("{}: not a regular file or directory", host_path.display());
         }
+    }
+    Ok(())
+}
+
+/// Create every hard link parked by [`populate_tree`], once the whole
+/// tree has been populated and `created` names every possible target.
+/// A target absent from `created` -- the sidecar's `dir`/`file` line for
+/// it is missing, or it was itself dropped for not fitting -- is an
+/// error naming the link, not a silent drop.
+fn resolve_hardlinks(pop: &mut Populator<FileDisk>, created: &HashMap<Vec<u8>, u64>, pending: &[PendingHardlink]) -> Result<()> {
+    for link in pending {
+        let target_lba = *created.get(&link.target_path).with_context(|| {
+            format!("{}: hard link's target {} was not created", link.display, display_name(&link.target_path))
+        })?;
+        let meta = Metadata::new().protection(link.protection).date(link.date).comment(&link.comment);
+        pop.create_hardlink(link.parent_lba, &link.name, &meta, target_lba)
+            .map_err(|e| anyhow!("{e}"))
+            .with_context(|| format!("creating hard link {}", link.display))?;
     }
     Ok(())
 }

@@ -16,13 +16,21 @@
 //! shrink it, and a shrink that no longer fits fails with the
 //! `Populator`'s own refusal rather than a truncated image.
 //!
-//! Hard and soft links have no representation `amiga_ffs::Populator`
-//! can create (its write surface is directories and files only), so an
-//! image containing one is refused rather than silently dropped.
+//! Soft links copy straight across (`Populator::create_softlink`, same
+//! per-directory pass as everything else -- a soft link's target string
+//! needs no target object to exist). Hard links need their target's
+//! header to already exist at its *new* LBA, which is not known until
+//! the whole tree has been copied, so every hard link in the source is
+//! parked during the copy and created afterwards by resolving its
+//! source-side target LBA (`Entry::real_entry`) to the ami-path recorded
+//! while copying, then to that path's new LBA. A target the copy never
+//! reached (unreachable from the root the walk started at) is an error
+//! naming the link.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use amiga_ffs::{EntryKind, FormatOptions, Metadata, Populator, Volume};
+use amiga_ffs::{DateStamp, EntryKind, FormatOptions, Metadata, Populator, Volume};
 use anyhow::{anyhow, bail, Context, Result};
 use clap::Args as ClapArgs;
 
@@ -76,8 +84,24 @@ pub fn run(image: &Path, args: Args) -> Result<()> {
         .with_context(|| format!("formatting a {target_bytes}-byte target"))?;
     let dst_root = pop.root_lba();
 
-    copy_dir(&mut src, &mut pop, src_root, dst_root)
+    let mut lba_map: HashMap<u64, u64> = HashMap::new();
+    lba_map.insert(src_root, dst_root);
+    let mut pending_hardlinks: Vec<PendingHardlink> = Vec::new();
+    copy_dir(&mut src, &mut pop, src_root, dst_root, &mut lba_map, &mut pending_hardlinks)
         .with_context(|| "the source's contents did not fit the target size".to_string())?;
+
+    for link in &pending_hardlinks {
+        let dst_target = *lba_map.get(&link.src_target_lba).with_context(|| {
+            format!(
+                "{}: hard link's target (source block {}) was never copied (unreachable from the root)",
+                link.display, link.src_target_lba
+            )
+        })?;
+        let meta = Metadata::new().protection(link.protection).date(link.date).owner(link.owner).comment(&link.comment);
+        pop.create_hardlink(link.parent_lba, &link.name, &meta, dst_target)
+            .map_err(|e| anyhow!("{e}"))
+            .with_context(|| format!("creating hard link {}", link.display))?;
+    }
 
     let mut disk = pop.finish().map_err(|e| anyhow!("{e}"))?;
     if boot_meaningful {
@@ -94,9 +118,34 @@ pub fn run(image: &Path, args: Args) -> Result<()> {
     Ok(())
 }
 
+/// A hard link found on the source, parked until every directory/file
+/// has been copied and its target might have a new LBA (see the module
+/// documentation).
+struct PendingHardlink {
+    parent_lba: u64,
+    name: Vec<u8>,
+    protection: u32,
+    date: DateStamp,
+    owner: u32,
+    comment: Vec<u8>,
+    src_target_lba: u64,
+    display: String,
+}
+
 /// Copy one directory's entries from `src` into `dst`, recursively, in
-/// the reverse of `read_dir`'s own order.
-fn copy_dir(src: &mut Volume<FileDisk>, dst: &mut Populator<FileDisk>, src_dir: u64, dst_dir: u64) -> Result<()> {
+/// the reverse of `read_dir`'s own order. `lba_map` gains one entry per
+/// directory/file copied, keyed by its *source* LBA -- what a hard
+/// link's target is resolved through once the whole tree is done, since
+/// `Entry::real_entry` on the source names a source LBA, not a
+/// destination one.
+fn copy_dir(
+    src: &mut Volume<FileDisk>,
+    dst: &mut Populator<FileDisk>,
+    src_dir: u64,
+    dst_dir: u64,
+    lba_map: &mut HashMap<u64, u64>,
+    pending_hardlinks: &mut Vec<PendingHardlink>,
+) -> Result<()> {
     let entries = src
         .read_dir(src_dir)
         .map_err(|e| anyhow!("{e}"))
@@ -120,7 +169,8 @@ fn copy_dir(src: &mut Volume<FileDisk>, dst: &mut Populator<FileDisk>, src_dir: 
                     .create_dir(dst_dir, &entry.name, &meta)
                     .map_err(|e| anyhow!("{e}"))
                     .with_context(|| format!("creating directory {ami_display}"))?;
-                copy_dir(src, dst, entry.lba, child)?;
+                lba_map.insert(entry.lba, child);
+                copy_dir(src, dst, entry.lba, child, lba_map, pending_hardlinks)?;
             }
             EntryKind::File => {
                 let chain = src
@@ -129,25 +179,48 @@ fn copy_dir(src: &mut Volume<FileDisk>, dst: &mut Populator<FileDisk>, src_dir: 
                     .with_context(|| format!("reading {ami_display}"))?;
                 let mut offset = 0u64;
                 let mut failure: Option<amiga_ffs::Error<DiskError>> = None;
-                dst.create_file_with(dst_dir, &entry.name, &meta, |buf| match src.read_range(&chain, offset, buf) {
-                    Ok(n) => {
-                        offset += n as u64;
-                        n
-                    }
-                    Err(e) => {
-                        failure.get_or_insert(e);
-                        0
-                    }
-                })
-                .map_err(|e| anyhow!("{e}"))
-                .with_context(|| format!("writing {ami_display}"))?;
+                let lba = dst
+                    .create_file_with(dst_dir, &entry.name, &meta, |buf| match src.read_range(&chain, offset, buf) {
+                        Ok(n) => {
+                            offset += n as u64;
+                            n
+                        }
+                        Err(e) => {
+                            failure.get_or_insert(e);
+                            0
+                        }
+                    })
+                    .map_err(|e| anyhow!("{e}"))
+                    .with_context(|| format!("writing {ami_display}"))?;
                 if let Some(e) = failure {
                     bail!("reading {ami_display}: {e}");
                 }
+                lba_map.insert(entry.lba, lba);
             }
-            other => bail!(
-                "{ami_display}: {other:?} entries are not supported by repack (amiga-ffs's Populator has no way to create a link)"
-            ),
+            EntryKind::SoftLink => {
+                let target = src
+                    .read_softlink(entry.lba)
+                    .map_err(|e| anyhow!("{e}"))
+                    .with_context(|| format!("reading soft link {ami_display}"))?;
+                dst.create_softlink(dst_dir, &entry.name, &meta, &target)
+                    .map_err(|e| anyhow!("{e}"))
+                    .with_context(|| format!("creating soft link {ami_display}"))?;
+            }
+            EntryKind::LinkFile | EntryKind::LinkDir => {
+                if entry.real_entry == 0 {
+                    bail!("{ami_display}: hard link with no target (real_entry is 0)");
+                }
+                pending_hardlinks.push(PendingHardlink {
+                    parent_lba: dst_dir,
+                    name: entry.name.clone(),
+                    protection: entry.protection,
+                    date: entry.date,
+                    owner: entry.owner,
+                    comment: comment.clone(),
+                    src_target_lba: entry.real_entry as u64,
+                    display: ami_display.clone(),
+                });
+            }
         }
     }
     Ok(())

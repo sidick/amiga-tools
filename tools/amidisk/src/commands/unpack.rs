@@ -28,8 +28,10 @@
 //! ```text
 //! amimeta 1
 //! volume "<name>" <dostype-hex> <iso-date>
-//! dir  "<ami-path>" <protect> <iso-date> "<comment>"
-//! file "<ami-path>" <protect> <iso-date> "<comment>"
+//! dir   "<ami-path>" <protect> <iso-date> "<comment>"
+//! file  "<ami-path>" <protect> <iso-date> "<comment>"
+//! slink "<ami-path>" <protect> <iso-date> "<comment>" "<target-path>"
+//! hlink "<ami-path>" <protect> <iso-date> "<comment>" "<target-ami-path>"
 //! ```
 //!
 //! - `amimeta 1` is the version header: the first non-blank line,
@@ -38,20 +40,55 @@
 //!   `0x444f5303`-style hex literal (parseable by [`super::parse_variant`]
 //!   and unambiguous regardless of variant naming drift), and the
 //!   creation date recorded in the root block (`disk_made`).
-//! - `dir`/`file` lines appear in the order [`amiga_ffs::Volume::read_dir`]
-//!   itself returns entries — the same order `List`/`list` shows — so
-//!   that `pack`, inserting them in the *reverse* of that order per
-//!   directory, reproduces the identical hash-chain layout: a
-//!   [`amiga_ffs::Populator`] inserts at the head of its slot's chain,
-//!   so undoing that reversal on the way back in is what makes the
-//!   repacked volume list in the same order as the original. `<ami-path>`
-//!   is the full path from the volume root, `/`-separated, raw Latin-1.
-//!   `<protect>` is the entry's protection bits rendered the way
-//!   [`amiga_ffs::Protection`]'s `Display` does (`hsparwed`, `-` for each
-//!   bit that is off).
+//! - `dir`/`file`/`slink`/`hlink` lines appear in the order
+//!   [`amiga_ffs::Volume::read_dir`] itself returns entries — the same
+//!   order `List`/`list` shows — so that `pack`, inserting them in the
+//!   *reverse* of that order per directory, reproduces the identical
+//!   hash-chain layout: a [`amiga_ffs::Populator`] inserts at the head of
+//!   its slot's chain, so undoing that reversal on the way back in is
+//!   what makes the repacked volume list in the same order as the
+//!   original. `<ami-path>` is the full path from the volume root,
+//!   `/`-separated, raw Latin-1. `<protect>` is the entry's protection
+//!   bits rendered the way [`amiga_ffs::Protection`]'s `Display` does
+//!   (`hsparwed`, `-` for each bit that is off).
+//! - `slink` is a soft link: `<target-path>` is the raw path bytes the
+//!   link stores, verbatim — a soft link never has content of its own
+//!   and needs no existence check to record.
+//! - `hlink` is a hard link: `<target-ami-path>` is the *volume* path
+//!   (from the root, `/`-separated) of the object it names — resolved at
+//!   `unpack` time from `Entry::real_entry`'s LBA back to a path, since
+//!   an LBA is meaningless once the tree is rebuilt at different
+//!   addresses. `pack`/`repack` re-resolve that path to whatever LBA the
+//!   rebuilt target landed at, so a hard link's target must itself
+//!   appear earlier as a `dir`/`file` line in the sidecar (or exist in
+//!   the source volume, for `repack`) — see those modules for the "link
+//!   whose target went missing" error.
 //! - The root's own protection and comment are not recorded: the root
 //!   block has no such fields to restore.
+//!
+//! ## Host representation of links
+//!
+//! The `.amimeta` sidecar is the sole source of truth for both kinds —
+//! `pack`/`repack` never read a host symlink back, only the recorded
+//! text — because a hard link has no sensible host analogue (the host's
+//! own hard links tie two *files*, never a directory, and this format's
+//! links may name either), and a soft link's target string is not even
+//! guaranteed to be host-meaningful (it may be an absolute
+//! `Volume:path`, an AmigaDOS assign, or deliberately dangling).
+//!
+//! A hard link therefore leaves nothing on the host filesystem at all.
+//! A soft link whose target *looks* like a plain relative path — no
+//! `:` (which would mean an Amiga volume or assign name, not a host
+//! concept) and no NUL — additionally gets a best-effort host symlink
+//! created next to it (`/` kept as the separator, a leading run of `/`
+//! translated from AmigaDOS's "go up a level" syntax into that many
+//! `../`), purely as a convenience for browsing the unpacked tree in a
+//! host file manager; a target containing `:`, or one the host refuses
+//! to symlink (e.g. it already exists, or the platform has no symlink
+//! primitive), gets no host entry. Either way the sidecar's byte-exact
+//! `slink` line, not the host symlink, is what `pack` reads back.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -88,15 +125,25 @@ pub fn run(image: &Path, args: Args) -> Result<()> {
     }
     fs::create_dir_all(&vol_dir).with_context(|| format!("creating {}", vol_dir.display()))?;
 
-    let mut entries = Vec::new();
+    let mut state = ExtractState::default();
     let root = vol.root_lba();
-    extract_dir(&mut vol, root, &vol_dir, &[], &mut entries, args.uaem)?;
+    extract_dir(&mut vol, root, &vol_dir, &[], &mut state, args.uaem)?;
+
+    for (index, target_lba) in &state.pending_hardlinks {
+        let target_path = state.lba_paths.get(target_lba).with_context(|| {
+            format!(
+                "{}: hard link's target (block {target_lba}) is not reachable from the volume root",
+                display_name(&state.entries[*index].path)
+            )
+        })?;
+        state.entries[*index].kind = MetaKind::HardLink(target_path.clone());
+    }
 
     let sidecar = Sidecar {
         volume_name: volume_name.clone(),
         dostype: variant.dostype(),
         created,
-        entries,
+        entries: state.entries,
     };
     let meta_path = vol_dir.with_extension("amimeta");
     write_sidecar(&meta_path, &sidecar)?;
@@ -117,17 +164,29 @@ pub fn run(image: &Path, args: Args) -> Result<()> {
     Ok(())
 }
 
+/// Accumulator threaded through [`extract_dir`]'s recursion: the
+/// sidecar entries recorded so far, plus what's needed to resolve hard
+/// links once the whole tree has been seen (see `run`'s use of
+/// `pending_hardlinks`).
+#[derive(Default)]
+struct ExtractState {
+    entries: Vec<MetaEntry>,
+    /// A directory's or file's own header LBA -> its ami-path, built up
+    /// as the walk visits it -- what a hard link's `real_entry` LBA is
+    /// resolved against once the whole tree has been seen.
+    lba_paths: HashMap<u64, Vec<u8>>,
+    /// One `(index into entries, target LBA)` per hard link found. The
+    /// target may not have been visited yet when the link itself is
+    /// (it could be later in this same directory, or in one not yet
+    /// walked), so resolution to a path waits until `run` has the
+    /// complete `lba_paths`.
+    pending_hardlinks: Vec<(usize, u64)>,
+}
+
 /// Walk one directory, extracting every entry under `host_dir` and
-/// recording it in `out`. `ami_prefix` is the path from the volume root
-/// to `host_dir`, empty at the root itself.
-fn extract_dir(
-    vol: &mut Volume<FileDisk>,
-    dir_lba: u64,
-    host_dir: &Path,
-    ami_prefix: &[u8],
-    out: &mut Vec<MetaEntry>,
-    uaem: bool,
-) -> Result<()> {
+/// recording it in `state`. `ami_prefix` is the path from the volume
+/// root to `host_dir`, empty at the root itself.
+fn extract_dir(vol: &mut Volume<FileDisk>, dir_lba: u64, host_dir: &Path, ami_prefix: &[u8], state: &mut ExtractState, uaem: bool) -> Result<()> {
     let list = vol
         .read_dir(dir_lba)
         .map_err(|e| anyhow::anyhow!("{e}"))
@@ -148,9 +207,10 @@ fn extract_dir(
             EntryKind::Directory => {
                 fs::create_dir_all(&host_path)
                     .with_context(|| format!("creating {}", host_path.display()))?;
-                out.push(MetaEntry {
+                state.lba_paths.insert(entry.lba, ami_path.clone());
+                state.entries.push(MetaEntry {
                     path: ami_path.clone(),
-                    is_dir: true,
+                    kind: MetaKind::Dir,
                     protection: entry.protection,
                     date: entry.date,
                     comment: comment.clone(),
@@ -158,7 +218,7 @@ fn extract_dir(
                 if uaem {
                     write_uaem(&host_path, entry.protection, entry.date, &comment)?;
                 }
-                extract_dir(vol, entry.lba, &host_path, &ami_path, out, uaem)?;
+                extract_dir(vol, entry.lba, &host_path, &ami_path, state, uaem)?;
             }
             EntryKind::File => {
                 let content = vol
@@ -167,9 +227,10 @@ fn extract_dir(
                     .with_context(|| format!("reading {ami_display}"))?;
                 fs::write(&host_path, &content)
                     .with_context(|| format!("writing {}", host_path.display()))?;
-                out.push(MetaEntry {
+                state.lba_paths.insert(entry.lba, ami_path.clone());
+                state.entries.push(MetaEntry {
                     path: ami_path.clone(),
-                    is_dir: false,
+                    kind: MetaKind::File,
                     protection: entry.protection,
                     date: entry.date,
                     comment: comment.clone(),
@@ -178,10 +239,71 @@ fn extract_dir(
                     write_uaem(&host_path, entry.protection, entry.date, &comment)?;
                 }
             }
-            other => bail!("{ami_display}: {other:?} entries are not supported by unpack (hard/soft links have no host representation this crate can derive)"),
+            EntryKind::SoftLink => {
+                let target = vol
+                    .read_softlink(entry.lba)
+                    .map_err(|e| anyhow::anyhow!("{e}"))
+                    .with_context(|| format!("reading soft link {ami_display}"))?;
+                maybe_write_host_symlink(&host_path, &target);
+                state.entries.push(MetaEntry {
+                    path: ami_path.clone(),
+                    kind: MetaKind::SoftLink(target),
+                    protection: entry.protection,
+                    date: entry.date,
+                    comment: comment.clone(),
+                });
+            }
+            EntryKind::LinkFile | EntryKind::LinkDir => {
+                if entry.real_entry == 0 {
+                    bail!("{ami_display}: hard link with no target (real_entry is 0)");
+                }
+                let index = state.entries.len();
+                state.entries.push(MetaEntry {
+                    path: ami_path.clone(),
+                    // Placeholder: patched by `run` once every LBA in
+                    // this tree has been seen.
+                    kind: MetaKind::HardLink(Vec::new()),
+                    protection: entry.protection,
+                    date: entry.date,
+                    comment: comment.clone(),
+                });
+                state.pending_hardlinks.push((index, entry.real_entry as u64));
+            }
         }
     }
     Ok(())
+}
+
+/// Best-effort host symlink for a soft link's target, purely so the
+/// unpacked tree browses sensibly in a host file manager; see this
+/// module's documentation for why the sidecar, not this symlink, is the
+/// authoritative record `pack` reads back.
+///
+/// Skipped outright when `target` contains a `:` (an Amiga volume or
+/// assign name, meaningless as a host path) or is not valid Latin-1
+/// text convertible to a host path; a leading run of `/` -- AmigaDOS's
+/// "go up a level" syntax -- becomes that many `../`. Any failure to
+/// create the symlink (platform has none, name collision, ...) is
+/// swallowed: this is a convenience, never the source of truth.
+fn maybe_write_host_symlink(host_path: &Path, target: &[u8]) {
+    if target.contains(&b':') || target.contains(&0) {
+        return;
+    }
+    let text = display_name(target);
+    let ups = text.chars().take_while(|&c| c == '/').count();
+    let rest = &text[ups..];
+    let mut host_target = "../".repeat(ups);
+    host_target.push_str(rest);
+
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(&host_target, host_path);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = host_target;
+        let _ = host_path;
+    }
 }
 
 fn join_path(prefix: &[u8], name: &[u8]) -> Vec<u8> {
@@ -198,11 +320,27 @@ fn join_path(prefix: &[u8], name: &[u8]) -> Vec<u8> {
 // The .amimeta sidecar
 // ---------------------------------------------------------------------------
 
+/// What kind of thing a recorded entry is, plus whatever extra data its
+/// line needs beyond the fields every kind shares (path, protection,
+/// date, comment).
+pub(crate) enum MetaKind {
+    Dir,
+    File,
+    /// A soft link's target path, stored verbatim (raw Latin-1 bytes,
+    /// never validated or resolved).
+    SoftLink(Vec<u8>),
+    /// A hard link's target, as the *volume* ami-path (from the root)
+    /// of the object it names -- resolved from `Entry::real_entry`'s
+    /// LBA at `unpack` time, since an LBA means nothing once the tree
+    /// is rebuilt at different addresses.
+    HardLink(Vec<u8>),
+}
+
 /// One recorded entry: enough for `pack` to reproduce it exactly.
 pub(crate) struct MetaEntry {
     /// Full path from the volume root, `/`-separated, raw Latin-1.
     pub path: Vec<u8>,
-    pub is_dir: bool,
+    pub kind: MetaKind,
     pub protection: u32,
     pub date: DateStamp,
     pub comment: Vec<u8>,
@@ -242,14 +380,27 @@ pub(crate) fn write_sidecar(path: &Path, sidecar: &Sidecar) -> Result<()> {
         format_date(sidecar.created)
     ));
     for e in &sidecar.entries {
+        let tag = match &e.kind {
+            MetaKind::Dir => "dir  ",
+            MetaKind::File => "file ",
+            MetaKind::SoftLink(_) => "slink",
+            MetaKind::HardLink(_) => "hlink",
+        };
         out.push_str(&format!(
-            "{} {} {} {} {}\n",
-            if e.is_dir { "dir " } else { "file" },
+            "{tag} {} {} {} {}",
             quote_bytes(&e.path),
             format_protect(e.protection),
             format_date(e.date),
             quote_bytes(&e.comment),
         ));
+        match &e.kind {
+            MetaKind::SoftLink(target) | MetaKind::HardLink(target) => {
+                out.push(' ');
+                out.push_str(&quote_bytes(target));
+            }
+            MetaKind::Dir | MetaKind::File => {}
+        }
+        out.push('\n');
     }
     fs::write(path, out).with_context(|| format!("writing {}", path.display()))
 }
@@ -281,10 +432,20 @@ pub(crate) fn read_sidecar(path: &Path) -> Result<Sidecar> {
 
     let mut entries = Vec::new();
     for line in lines {
-        let (is_dir, rest) = if let Some(r) = line.strip_prefix("dir ") {
-            (true, r)
+        enum Tag {
+            Dir,
+            File,
+            SoftLink,
+            HardLink,
+        }
+        let (tag, rest) = if let Some(r) = line.strip_prefix("dir ") {
+            (Tag::Dir, r)
         } else if let Some(r) = line.strip_prefix("file ") {
-            (false, r)
+            (Tag::File, r)
+        } else if let Some(r) = line.strip_prefix("slink ") {
+            (Tag::SoftLink, r)
+        } else if let Some(r) = line.strip_prefix("hlink ") {
+            (Tag::HardLink, r)
         } else {
             bail!("{}: unrecognised line {line:?}", path.display());
         };
@@ -299,10 +460,23 @@ pub(crate) fn read_sidecar(path: &Path) -> Result<Sidecar> {
             .split_once(' ')
             .with_context(|| format!("{}: truncated entry line {line:?}", path.display()))?;
         let date = parse_date(date_str)?;
-        let (comment, _) = unquote_bytes(rest.trim_start())?;
+        let (comment, rest) = unquote_bytes(rest.trim_start())?;
+        let kind = match tag {
+            Tag::Dir => MetaKind::Dir,
+            Tag::File => MetaKind::File,
+            Tag::SoftLink | Tag::HardLink => {
+                let (target, _) = unquote_bytes(rest.trim_start())
+                    .with_context(|| format!("{}: {line:?}: missing link target", path.display()))?;
+                if matches!(tag, Tag::SoftLink) {
+                    MetaKind::SoftLink(target)
+                } else {
+                    MetaKind::HardLink(target)
+                }
+            }
+        };
         entries.push(MetaEntry {
             path: entry_path,
-            is_dir,
+            kind,
             protection,
             date,
             comment,
