@@ -1,12 +1,18 @@
 //! `amidisk <image> info` — volume-level facts, no traversal required.
 
-use amiga_ffs::Volume;
+use std::path::Path;
+
 use anyhow::Result;
+use clap::Args as ClapArgs;
 
 use super::display_name;
-use crate::disk::FileDisk;
 
-pub fn run(vol: &Volume<FileDisk>) -> Result<()> {
+#[derive(ClapArgs)]
+pub struct Args {}
+
+pub fn run(image: &Path, _args: Args) -> Result<()> {
+    let vol = super::open_volume(image)?;
+
     let root = vol.root();
     let variant = vol.variant();
     println!("image:       {} blocks x {} bytes", vol.block_count(), vol.block_size());

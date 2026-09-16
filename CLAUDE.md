@@ -29,8 +29,11 @@ capability the crate lacks, add it to the crate (in its own repo), not here.
   unwrap/expect outside genuinely impossible cases.
 - Comment style matches the foundation crates: terse and purposeful, only
   where the code can't say it.
-- amitools (Python) is the behavioural oracle: when in doubt about output or
-  semantics, compare against the real xdftool/rdbtool/romtool.
+- amitools (Python) is the feature oracle, not the semantics oracle: match
+  its capabilities, but prefer better CLI conventions where they exist
+  (ISO dates, clap flags, own sidecar formats). Keep compatibility only
+  for external interop formats (e.g. FS-UAE .uaem). Its tools remain
+  useful for cross-checking that on-disk results are correct.
 - Never commit ROM images or other copyrighted Amiga material.
 
 ## Verification
