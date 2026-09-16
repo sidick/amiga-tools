@@ -9,11 +9,6 @@ authors = ["Simon Dick <simond@irrelevant.org>"]
 repository = "https://github.com/sidick/amiga-tools"
 
 [workspace.dependencies]
-amiga-ffs = "0.3"
+amiga-ffs = "0.4"
 amiga-rdb = "0.4"
 amiga-rom = "0.4"
-
-# Until the next amiga-ffs release: pick up post-0.3.0 API added for
-# these tools (Mutator::relabel, ...). Drop when crates.io catches up.
-[patch.crates-io]
-amiga-ffs = { git = "https://github.com/sidick/amiga-ffs-rs" }
