@@ -1,15 +1,19 @@
-//! `amidisk <image> list [ami-path] [--all] [--info] [--detail]` — a
+//! `amidisk <image> list [ami-path] [--all] [--long] [--info]` — a
 //! directory listing.
 //!
-//! Interim behaviour: always recurses from the root (or `ami-path`, if
-//! given), regardless of `--all`; `--info`/`--detail` are accepted but
-//! not yet acted on. A later worker replaces this with amitools-xdftool
-//! parity (non-recursive by default, `--all` recurses, `--info` adds a
-//! stats footer, `--detail` adds storage detail per entry).
+//! Default: the immediate children of `ami-path` (or the root). `--all`
+//! recurses. `--long` adds protection flags, size, an ISO 8601
+//! modification date and the comment. `--info` appends a used/free
+//! blocks-and-bytes footer, from the same bitmap `info` reads.
+//!
+//! Entries print in the volume's own hash-table order — the order
+//! AmigaDOS's own `List` shows, not sorted — because sorting behind the
+//! caller's back would be a second, silent transformation of what is on
+//! the disk.
 
 use std::path::Path;
 
-use amiga_ffs::{EntryKind, Volume};
+use amiga_ffs::{Entry, EntryKind, Volume};
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
@@ -25,20 +29,17 @@ pub struct Args {
     #[arg(long)]
     pub all: bool,
 
-    /// Print a used/free stats footer.
+    /// Show protection flags, size, date and comment per entry.
+    #[arg(long)]
+    pub long: bool,
+
+    /// Print a used/free blocks-and-bytes footer.
     #[arg(long)]
     pub info: bool,
-
-    /// Print storage detail (blocks, fragmentation) per entry.
-    #[arg(long)]
-    pub detail: bool,
 }
 
 pub fn run(image: &Path, args: Args) -> Result<()> {
     let mut vol = super::open_volume(image)?;
-
-    let name = display_name(&vol.root().name);
-    println!("{name} [{:?}]", vol.variant());
 
     let start = match &args.ami_path {
         Some(p) => {
@@ -56,25 +57,88 @@ pub fn run(image: &Path, args: Args) -> Result<()> {
         None => vol.root_lba(),
     };
 
-    walk(&mut vol, start, "")
+    if args.all {
+        walk(&mut vol, start, "", args.long)?;
+    } else {
+        let entries = vol
+            .read_dir(start)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("reading directory")?;
+        for entry in &entries {
+            print_entry(&mut vol, entry, "", args.long)?;
+        }
+    }
+
+    if args.info {
+        print_footer(&mut vol)?;
+    }
+    Ok(())
 }
 
-fn walk(vol: &mut Volume<FileDisk>, dir_lba: u64, prefix: &str) -> Result<()> {
+fn walk(vol: &mut Volume<FileDisk>, dir_lba: u64, prefix: &str, long: bool) -> Result<()> {
     let entries = vol
         .read_dir(dir_lba)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("reading directory at block {dir_lba}"))?;
-    for entry in entries {
-        let name = display_name(&entry.name);
-        match entry.kind {
-            EntryKind::Directory => {
-                println!("{prefix}{name}/");
-                walk(vol, entry.lba, &format!("{prefix}{name}/"))?;
-            }
-            EntryKind::File => println!("{prefix}{name}  {} bytes", entry.byte_size),
-            // Links: named but not followed, same as amitools' xdftool.
-            other => println!("{prefix}{name}  [{other:?}]"),
+    for entry in &entries {
+        print_entry(vol, entry, prefix, long)?;
+        if entry.kind == EntryKind::Directory {
+            let name = display_name(&entry.name);
+            walk(vol, entry.lba, &format!("{prefix}{name}/"), long)?;
         }
     }
+    Ok(())
+}
+
+fn print_entry(vol: &mut Volume<FileDisk>, entry: &Entry, prefix: &str, long: bool) -> Result<()> {
+    let name = display_name(&entry.name);
+    let suffix = match entry.kind {
+        EntryKind::Directory => "/",
+        EntryKind::LinkDir => "/@",
+        EntryKind::File => "",
+        EntryKind::SoftLink | EntryKind::LinkFile => "@",
+    };
+
+    if !long {
+        println!("{prefix}{name}{suffix}");
+        return Ok(());
+    }
+
+    let prot = entry.protection_bits();
+    let size = if entry.kind == EntryKind::File {
+        entry.byte_size.to_string()
+    } else {
+        String::new()
+    };
+    let cal = entry.date.to_calendar();
+    let date = format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        cal.year, cal.month, cal.day, cal.hour, cal.minute, cal.second
+    );
+    let comment = vol
+        .comment(entry)
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("reading {name}'s comment"))?;
+    let comment = display_name(&comment);
+    let comment = if comment.is_empty() {
+        String::new()
+    } else {
+        format!("  ; {comment}")
+    };
+
+    println!("{prot} {size:>10} {date}  {prefix}{name}{suffix}{comment}");
+    Ok(())
+}
+
+fn print_footer(vol: &mut Volume<FileDisk>) -> Result<()> {
+    let stats = super::bitmap::stats(vol)?;
+    println!();
+    println!(
+        "{} blocks used ({} bytes), {} blocks free ({} bytes)",
+        stats.used_blocks,
+        stats.used_bytes(),
+        stats.free_blocks,
+        stats.free_bytes()
+    );
     Ok(())
 }

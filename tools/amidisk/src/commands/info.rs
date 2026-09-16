@@ -11,7 +11,7 @@ use super::display_name;
 pub struct Args {}
 
 pub fn run(image: &Path, _args: Args) -> Result<()> {
-    let vol = super::open_volume(image)?;
+    let mut vol = super::open_volume(image)?;
 
     let root = vol.root();
     let variant = vol.variant();
@@ -23,5 +23,13 @@ pub fn run(image: &Path, _args: Args) -> Result<()> {
     if let Some(used) = root.blocks_used {
         println!("blocks used: {used} (long-name volume, self-reported)");
     }
+
+    let stats = super::bitmap::stats(&mut vol)?;
+    println!(
+        "blocks used: {} ({} bytes, from the allocation bitmap)",
+        stats.used_blocks,
+        stats.used_bytes()
+    );
+    println!("blocks free: {} ({} bytes)", stats.free_blocks, stats.free_bytes());
     Ok(())
 }
