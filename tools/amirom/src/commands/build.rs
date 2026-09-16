@@ -47,5 +47,5 @@ fn parse_hex_u8(s: &str) -> Result<u8, String> {
 }
 
 pub fn run(_args: Args) -> Result<()> {
-    bail!("amirom build: not yet implemented (needs a ROM-builder counterpart to amiga_rom's split/combine)")
+    bail!("amirom build: needs ROM-image construction in amiga-rom (no module layout/relocation or header synthesis yet)")
 }

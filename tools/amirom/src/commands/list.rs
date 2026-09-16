@@ -20,5 +20,5 @@ pub struct Args {
 }
 
 pub fn run(_args: Args) -> Result<()> {
-    bail!("amirom list: not yet implemented (needs a module-boundary catalog; see amiga-rom's PLAN.md milestone 6)")
+    bail!("amirom list: needs a module-boundary catalog in amiga-rom (no public split data yet)")
 }

@@ -38,5 +38,5 @@ pub struct Args {
 }
 
 pub fn run(_args: Args) -> Result<()> {
-    bail!("amirom split: not yet implemented (needs a module-boundary catalog; see amiga-rom's PLAN.md milestone 6)")
+    bail!("amirom split: needs a module-boundary catalog in amiga-rom (no public split data yet)")
 }

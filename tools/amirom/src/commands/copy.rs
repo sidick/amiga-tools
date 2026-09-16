@@ -37,5 +37,5 @@ pub struct Args {
 }
 
 pub fn run(_args: Args) -> Result<()> {
-    bail!("amirom copy: not yet implemented (amiga_rom has no public byte-order re-encode or Cloanto-encode function yet)")
+    bail!("amirom copy: needs a byte-order/Cloanto re-encode direction in amiga-rom (Loader only normalizes inbound)")
 }

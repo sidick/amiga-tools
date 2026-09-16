@@ -11,5 +11,5 @@ use clap::Args as ClapArgs;
 pub struct Args {}
 
 pub fn run(_args: Args) -> Result<()> {
-    bail!("amirom patches: not yet implemented (no named-patch table defined yet)")
+    bail!("amirom patches: needs a named-patch table in amiga-rom; `amirom patch --set` applies explicit byte patches today")
 }
