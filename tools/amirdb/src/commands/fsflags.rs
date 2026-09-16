@@ -11,10 +11,17 @@
 //! life with) patches a zero into that device-node field — the same
 //! thing amitools' rdbtool does when asked for a bare flag with no
 //! value.
+//!
+//! Uses [`amiga_rdb::RdbEditor::set_patch_flags`], which patches the
+//! `fhb_PatchFlags` longword in the `FSHD` block directly. The driver
+//! binary is never read back or rewritten, and the `LSEG` chain is
+//! untouched — before this method existed, flipping one bit meant
+//! reconstructing a whole `FileSystemSpec` (driver binary included) and
+//! rewriting the entire chain through `replace_filesystem`.
 
 use std::path::Path;
 
-use amiga_rdb::{fshd_patch, FileSystemSpec};
+use amiga_rdb::fshd_patch;
 use anyhow::{bail, Context, Result};
 use clap::Args as ClapArgs;
 
@@ -105,33 +112,13 @@ pub fn run(image: &Path, block_size: usize, args: Args) -> Result<()> {
         bail!("flag(s) {} given to both --set and --clear", both.join(","));
     }
 
-    let (mut editor, mut disk) = super::open_editor(image, block_size)?;
+    let (mut editor, disk) = super::open_editor(image, block_size)?;
     let index = super::find_filesystem(editor.rdb(), &args.selector)?;
     let f = editor.rdb().filesystems[index].clone();
 
-    // Reproduce the existing FSHD verbatim, then flip only the
-    // requested bits — see `amiga-rdb`'s own filesystem-preserving
-    // rebuild test for this exact `FileSystemSpec` reconstruction.
-    let binary = editor
-        .rdb()
-        .load_filesystem(&f, &mut disk)
-        .map_err(|e| anyhow::anyhow!("{e}"))
-        .context("reading LSEG chain")?;
-    let mut spec = FileSystemSpec::new(f.dos_type, binary).version(f.version_major(), f.version_minor());
-    spec.host_id = f.host_id;
-    spec.flags = f.flags;
-    spec.node_type = f.node_type;
-    spec.task = f.task;
-    spec.lock = f.lock;
-    spec.handler = f.handler;
-    spec.stack_size = f.stack_size;
-    spec.priority = f.priority;
-    spec.startup = f.startup;
-    spec.global_vec = f.global_vec;
-    spec.patch_flags = Some((f.patch_flags | set_mask) & !clear_mask);
-
+    let new_flags = (f.patch_flags | set_mask) & !clear_mask;
     editor
-        .replace_filesystem(index, spec)
+        .set_patch_flags(index, new_flags)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("rewriting filesystem flags")?;
 

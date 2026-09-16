@@ -1,5 +1,11 @@
 //! `amirdb <image> fsget <dostype-or-index> <out-file>` — extract a
 //! loadable filesystem driver's binary to a host file.
+//!
+//! Uses [`amiga_rdb::Rdb::load_filesystem_exact`], which trims the
+//! trailing block's padding down to the byte length the `LSEG` chain's
+//! own `SummedLongs` fields encode — the amitools `rdbtool fsget`
+//! behaviour, and byte-exact for any driver whose original length was a
+//! multiple of four (see that method's doc comment for the rest).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -22,7 +28,7 @@ pub fn run(image: &Path, block_size: usize, args: Args) -> Result<()> {
     let f = &rdb.filesystems[index];
 
     let binary = rdb
-        .load_filesystem(f, &mut disk)
+        .load_filesystem_exact(f, &mut disk)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .context("reading LSEG chain")?;
 

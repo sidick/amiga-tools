@@ -9,15 +9,6 @@ use clap::Args as ClapArgs;
 
 use super::add::warn_if_not_clean;
 
-/// `DosEnvec` longword indices for the three mount parameters
-/// [`Partition`](amiga_rdb::Partition) does not surface as named fields
-/// — `de_Reserved`/`de_PreAlloc`/`de_Interleave`, NDK `dos/filehandler.h`
-/// order — read out of [`Partition::envec_raw`] for the before/after
-/// summary.
-const DE_RESERVED: usize = 6;
-const DE_PRE_ALLOC: usize = 7;
-const DE_INTERLEAVE: usize = 8;
-
 #[derive(ClapArgs)]
 pub struct Args {
     /// Partition index, or `pb_DriveName` (case-insensitive).
@@ -145,15 +136,15 @@ pub fn run(image: &Path, block_size: usize, args: Args) -> Result<()> {
     }
     if let Some(v) = args.reserved {
         editor.set_reserved(index, v).map_err(|e| anyhow::anyhow!("{e}"))?;
-        changes.push(format!("reserved: {} -> {v}", before.envec_raw.get(DE_RESERVED).copied().unwrap_or(0)));
+        changes.push(format!("reserved: {} -> {v}", before.reserved));
     }
     if let Some(v) = args.pre_alloc {
         editor.set_pre_alloc(index, v).map_err(|e| anyhow::anyhow!("{e}"))?;
-        changes.push(format!("pre-alloc: {} -> {v}", before.envec_raw.get(DE_PRE_ALLOC).copied().unwrap_or(0)));
+        changes.push(format!("pre-alloc: {} -> {v}", before.pre_alloc));
     }
     if let Some(v) = args.interleave {
         editor.set_interleave(index, v).map_err(|e| anyhow::anyhow!("{e}"))?;
-        changes.push(format!("interleave: {} -> {v}", before.envec_raw.get(DE_INTERLEAVE).copied().unwrap_or(0)));
+        changes.push(format!("interleave: {} -> {v}", before.interleave));
     }
     if let Some(v) = args.num_buffers {
         editor.set_num_buffers(index, v).map_err(|e| anyhow::anyhow!("{e}"))?;

@@ -8,34 +8,25 @@
 //! of the five chain types but which no chain this crate walked actually
 //! reached — most likely a stray or orphaned block).
 //!
-//! `LSEG` block LBAs are the one thing [`amiga_rdb::Rdb`] does not
-//! surface directly — it keeps each filesystem's chain *head*
-//! ([`amiga_rdb::FileSysHeader::seg_list_blocks`]) but not the full list
-//! of blocks the chain visits. So this command walks each chain itself,
-//! reading raw blocks off the disk and following the `Next` pointer at
-//! byte offset 16 that every chained block (`PART`/`FSHD`/`LSEG`/`BADB`)
-//! shares — the same offset `amiga_rdb`'s own internal `walk_chain`
-//! uses, just not one it exports. See this crate's implementation report
-//! for the precise API gap this papers over.
+//! `LSEG` block LBAs are the one thing [`amiga_rdb::Rdb`] does not keep
+//! after [`amiga_rdb::Rdb::parse`] — the chain is walked lazily, and only
+//! each filesystem's chain *head* ([`amiga_rdb::FileSysHeader::seg_list_blocks`])
+//! survives. [`amiga_rdb::Rdb::lseg_blocks`] re-walks the chain and hands
+//! back the LBAs directly, with the same checks (ID, checksum, cycle,
+//! off-disk) `load_filesystem` applies — so this command no longer needs
+//! to duplicate that walk by hand.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::Path;
 
-use amiga_rdb::{be32, id, BlockSource, CHAIN_END};
-use anyhow::{bail, Result};
+use amiga_rdb::BlockSource;
+use anyhow::{bail, Context, Result};
 use clap::Args as ClapArgs;
 
 use super::open_rdb;
 
 #[derive(ClapArgs)]
 pub struct Args {}
-
-/// Byte offset of the `Next` chain pointer shared by every `PART`,
-/// `FSHD`, `LSEG` and `BADB` block. Not part of `amiga_rdb`'s public API
-/// (it's `chain::NEXT` there, a private module) but stable: it's the
-/// fifth longword every chained block starts with, documented in the
-/// NDK layouts those structs are read from.
-const CHAIN_NEXT_OFFSET: usize = 16;
 
 pub fn run(image: &Path, block_size: usize, _args: Args) -> Result<()> {
     let (rdb, mut disk) = open_rdb(image, block_size)?;
@@ -62,19 +53,17 @@ pub fn run(image: &Path, block_size: usize, _args: Args) -> Result<()> {
         kind.entry(b).or_insert('B');
     }
 
-    let mut buf = vec![0u8; disk.block_size()];
     for f in &rdb.filesystems {
-        let mut next = f.seg_list_blocks;
-        let mut visited = BTreeSet::new();
-        while next != CHAIN_END && visited.insert(next) {
-            let lba = next as u64;
-            if disk.read_block(lba, &mut buf).is_err() || be32(&buf, 0) != id::LSEG {
-                break;
-            }
+        let lbas = rdb
+            .lseg_blocks(f, &mut disk)
+            .map_err(|e| anyhow::anyhow!("{e}"))
+            .context("walking LSEG chain")?;
+        for lba in lbas {
             kind.entry(lba).or_insert('L');
-            next = be32(&buf, CHAIN_NEXT_OFFSET);
         }
     }
+
+    let mut buf = vec![0u8; disk.block_size()];
 
     const PER_ROW: u64 = 64;
     let mut row_start = lo;
