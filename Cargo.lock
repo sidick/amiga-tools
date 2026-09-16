@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "amiga-ffs"
 version = "0.3.0"
-source = "git+https://github.com/sidick/amiga-ffs-rs#ce75278e12274809c8262ad9fe44741759658160"
+source = "git+https://github.com/sidick/amiga-ffs-rs#c290691add3c7a6c1adacde0ff55bd0eea5013f4"
 
 [[package]]
 name = "amiga-rdb"

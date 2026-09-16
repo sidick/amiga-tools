@@ -100,6 +100,14 @@ impl BlockSource for FileDisk {
     }
 }
 
+impl amiga_ffs::ResizableMedium for FileDisk {
+    fn set_block_count(&mut self, new_block_count: u64) -> Result<(), Self::Error> {
+        // Vec::resize zero-fills on grow, as the trait requires.
+        self.data.resize(new_block_count as usize * self.block_size, 0);
+        Ok(())
+    }
+}
+
 impl BlockSink for FileDisk {
     type Error = DiskError;
 
