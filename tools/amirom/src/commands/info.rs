@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use crate::KeyArg;
+use crate::commands::{fmt_hex32, fmt_rev, KeyArg};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -77,19 +77,5 @@ fn describe_encoding(encoding: Option<amiga_rom::RomEncoding>) -> String {
         Some(RomEncoding::Raw(ByteOrder::Order1032)) => "raw, 1032 byte order".to_string(),
         Some(RomEncoding::Raw(ByteOrder::Order2301)) => "raw, 2301 byte order".to_string(),
         Some(RomEncoding::Raw(ByteOrder::Order3210)) => "raw, 3210 byte order".to_string(),
-    }
-}
-
-fn fmt_hex32(v: Option<u32>) -> String {
-    match v {
-        Some(v) => format!("0x{v:08X}"),
-        None => "-".to_string(),
-    }
-}
-
-fn fmt_rev(v: Option<(u16, u16)>) -> String {
-    match v {
-        Some((maj, min)) => format!("{maj}.{min}"),
-        None => "-".to_string(),
     }
 }

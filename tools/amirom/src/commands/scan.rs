@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Args as ClapArgs;
 
-use crate::cmd::load_and_normalize;
-use crate::KeyArg;
+use crate::commands::{load_rom, KeyArg};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -17,7 +16,7 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<()> {
     let key = args.key.load()?;
-    let normalized = load_and_normalize(&args.rom, key.as_deref())?;
+    let normalized = load_rom(&args.rom, key.as_deref())?;
     let rom = amiga_rom::KickRom::new(&normalized);
 
     let mut count = 0;

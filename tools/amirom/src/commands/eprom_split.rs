@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
 
-use crate::cmd::load_and_normalize;
-use crate::KeyArg;
+use crate::commands::{load_rom, KeyArg};
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -21,7 +20,7 @@ pub struct Args {
 
 pub fn run(args: Args) -> Result<()> {
     let key = args.key.load()?;
-    let normalized = load_and_normalize(&args.rom, key.as_deref())?;
+    let normalized = load_rom(&args.rom, key.as_deref())?;
     let (hi, lo) = amiga_rom::split_hi_lo(&normalized).context("splitting hi/lo EPROM images")?;
 
     std::fs::write(&args.hi_out, &hi)

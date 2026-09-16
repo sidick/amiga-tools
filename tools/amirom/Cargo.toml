@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-description = "Inspect, scan, normalize, split and merge Amiga Kickstart ROM images"
+description = "Inspect, dump, diff, scan, normalize, split, build and patch Amiga Kickstart ROM images"
 
 [dependencies]
 amiga-rom = { workspace = true }
