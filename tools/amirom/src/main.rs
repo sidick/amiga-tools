@@ -63,7 +63,10 @@ enum Command {
     /// EPROM-split sense of `split` must be updated to `eprom-split`.
     EpromSplit(commands::eprom_split::Args),
     /// Merge a hi/lo EPROM byte-dump pair back into one image.
-    #[command(alias = "merge", hide = true)]
+    // `merge` stays as an undocumented alias for the old name; a plain
+    // clap alias is already absent from `--help`, unlike the command
+    // itself, which `hide` would have taken with it.
+    #[command(alias = "merge")]
     EpromMerge(commands::eprom_merge::Args),
 }
 

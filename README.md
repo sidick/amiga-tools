@@ -8,11 +8,14 @@ dedicated format crates.
 |------|------|----------|
 | `amidisk` | ADF/HDF volume images: create, format, list, read/write files, metadata (protect/comment/time/relabel), boot blocks, pack/unpack/repack, validate, repair, defrag, resize | [amiga-ffs](https://crates.io/crates/amiga-ffs) |
 | `amirdb` | Rigid Disk Block partition tables: create/init, partition add/change/delete/fill, export/import, filesystem drivers, block map, geometry adjust/remap, validate | [amiga-rdb](https://crates.io/crates/amiga-rdb) |
-| `amirom` | Kickstart ROM images: info, resident scan, normalize, hi/lo split & merge | [amiga-rom](https://crates.io/crates/amiga-rom) |
+| `amirom` | Kickstart ROM images: info, dump, diff, resident scan, normalize, patch, combine, hi/lo EPROM split & merge | [amiga-rom](https://crates.io/crates/amiga-rom) |
 
 `amidisk` and `amirdb` cover the feature sets of amitools' xdftool and
 rdbtool plus extras (validation, repair, defrag, resize, links, block
-maps); `amirom` is still a read-side skeleton.
+maps). `amirom` covers romtool's inspection, patching and EPROM
+commands; its module-catalog commands (`list`, `query`, `split`,
+`build`, named `patches`) await capabilities tracked as issues on
+[amiga-rom](https://github.com/sidick/amiga-rom-rs/issues).
 
 ## Building
 
