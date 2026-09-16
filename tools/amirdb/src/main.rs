@@ -1,25 +1,36 @@
-//! `amirdb` — inspect Amiga Rigid Disk Block (RDB) partitioned images.
+//! `amirdb`: an amitools-`rdbtool`-equivalent CLI for Amiga Rigid Disk
+//! Block (RDB) partitioned images, built on `amiga-rdb`. This crate owns
+//! no partitioning logic itself: every subcommand is argument handling
+//! plus calls into that library's API, glued together by
+//! `commands::mod`'s shared helpers (`open_rdb`, `open_editor`,
+//! `commit_editor`, `parse_size`, `parse_dostype`, `parse_geometry`).
 //!
-//! An amitools `rdbtool`-alike built on the `amiga-rdb` library. This
-//! skeleton implements the read-only commands (`info`, `show`); mutating
-//! subcommands (`init`, `add`, `free`, ...) belong as further variants of
-//! [`Command`], each backed by `amiga_rdb::RdbBuilder` / `RdbEditor`.
+//! Each subcommand is `Command::X(commands::x::Args)`; `commands::x::run`
+//! owns everything past argument parsing. `create` needs no existing
+//! image and writes the path directly; `init` accepts either an
+//! existing image or `--create`; every other command goes through
+//! `open_rdb`/`open_editor`.
 
-use amiga_rdb::{rdb_flags, Rdb, SeekBlockSource, CHAIN_END};
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
-use std::fs::File;
+mod commands;
+mod disk;
+
 use std::path::PathBuf;
 
+use anyhow::Result;
+use clap::{Parser, Subcommand};
+
+use disk::DEFAULT_BLOCK_SIZE;
+
 #[derive(Parser)]
-#[command(name = "amirdb", about = "Inspect Amiga Rigid Disk Block images")]
+#[command(name = "amirdb", version, about = "Inspect and manipulate Amiga Rigid Disk Block images")]
 struct Cli {
-    /// Path to the disk image.
+    /// The disk image to operate on. For `create`, the image to write;
+    /// it must not already exist.
     image: PathBuf,
 
-    /// Device block size the image was taken from; must match the RDB's
-    /// `rdb_BlockBytes`.
-    #[arg(long, default_value_t = 512)]
+    /// Device block size the image is (or will be) in; for an existing
+    /// image this must match the RDB's `rdb_BlockBytes`.
+    #[arg(long = "block-size", default_value_t = DEFAULT_BLOCK_SIZE)]
     block_size: usize,
 
     #[command(subcommand)]
@@ -29,138 +40,72 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Print the RDSK/FSHD/bad-block summary.
-    Info,
+    Info(commands::info::Args),
     /// Print per-partition detail.
-    Show,
-}
-
-/// A dostype the conventional way: three printable characters and the
-/// version byte as a number, e.g. `DOS\3`. Shared by partitions and
-/// filesystem headers, which is the whole point — the two are matched on
-/// this value.
-fn dostype(v: u32) -> String {
-    let b = v.to_be_bytes();
-    format!("{}{}{}\\{}", b[0] as char, b[1] as char, b[2] as char, b[3])
-}
-
-fn open_rdb(cli: &Cli) -> Result<(Rdb, SeekBlockSource<File>)> {
-    let file = File::open(&cli.image)
-        .with_context(|| format!("opening {}", cli.image.display()))?;
-    let mut disk = SeekBlockSource::with_block_size(file, cli.block_size)
-        .with_context(|| format!("statting {}", cli.image.display()))?;
-    let rdb = Rdb::parse(&mut disk)
-        .with_context(|| format!("parsing RDB in {}", cli.image.display()))?;
-    Ok((rdb, disk))
-}
-
-fn cmd_info(cli: &Cli) -> Result<()> {
-    let (rdb, mut disk) = open_rdb(cli)?;
-
-    println!(
-        "RDSK at block {}  {} B/block  geometry {}/{}/{}  rdb blocks {}..={}",
-        rdb.rdsk_block,
-        rdb.block_bytes,
-        rdb.cylinders,
-        rdb.heads,
-        rdb.sectors,
-        rdb.rdb_blocks_lo,
-        rdb.rdb_blocks_hi
-    );
-    // Only printed when the flag says the bytes mean anything: without
-    // DISKID/CTRLRID these fields are uninitialised, and showing them
-    // would be inventing a drive identity.
-    if rdb.flags & rdb_flags::DISK_ID != 0 {
-        println!(
-            "disk: {} {} rev {}",
-            rdb.disk_vendor, rdb.disk_product, rdb.disk_revision
-        );
-    }
-    if rdb.flags & rdb_flags::CTRLR_ID != 0 {
-        println!(
-            "controller: {} {} rev {}",
-            rdb.controller_vendor, rdb.controller_product, rdb.controller_revision
-        );
-    }
-    // The loadable filesystems the image carries — this is how a
-    // partition with a dostype the ROM never heard of still mounts.
-    for f in &rdb.filesystems {
-        println!(
-            "FSHD at block {}  {}  version {}.{}  {}",
-            f.fshd_block,
-            dostype(f.dos_type),
-            f.version_major(),
-            f.version_minor(),
-            if f.seg_list_blocks == CHAIN_END {
-                String::from("no LSEG chain")
-            } else {
-                format!("LSEG chain head block {}", f.seg_list_blocks)
-            },
-        );
-    }
-    if !rdb.bad_blocks.is_empty() {
-        println!("bad blocks: {} remapped", rdb.bad_blocks.len());
-    }
-
-    // Layout validation last, so it reads as a verdict on everything
-    // printed above. Both halves: `validate` covers the chains held in
-    // memory, `validate_seg_lists` needs the disk back for the lazy
-    // LSEG blocks. Reported, never fatal — an image whose RDB has
-    // spilled into a partition is exactly the one someone is trying to
-    // recover.
-    let mut issues = rdb.validate();
-    match rdb.validate_seg_lists(&mut disk) {
-        Ok(more) => issues.extend(more),
-        Err(e) => eprintln!("{}: walking LSEG chains: {e}", cli.image.display()),
-    }
-    if !issues.is_empty() {
-        println!("layout issues ({}):", issues.len());
-        for issue in &issues {
-            println!("  ! {issue}");
-        }
-    }
-
-    Ok(())
-}
-
-fn cmd_show(cli: &Cli) -> Result<()> {
-    let (rdb, _disk) = open_rdb(cli)?;
-
-    for p in &rdb.partitions {
-        println!("{} ({})", p.name, dostype(p.dos_type));
-        println!(
-            "  cylinders {}..={}  ({} blocks/cyl)",
-            p.low_cyl, p.high_cyl, p.cylinder_blocks
-        );
-        println!(
-            "  lba {} +{} blocks  ({} MiB)",
-            p.start_lba,
-            p.block_len,
-            // Saturating: both factors come off the image, and a
-            // hostile `de_HighCyl` makes the product overflow — a
-            // debug panic, and in release a wrapped size printed as
-            // fact.
-            p.block_len.saturating_mul(rdb.block_bytes as u64) / (1024 * 1024)
-        );
-        println!(
-            "  flags: {}{}  boot priority {}",
-            if p.bootable { "bootable " } else { "" },
-            if p.no_automount { "no-automount " } else { "" },
-            p.boot_pri
-        );
-        println!(
-            "  buffers {}  max transfer 0x{:08x}  mask 0x{:08x}",
-            p.num_buffers, p.max_transfer, p.mask
-        );
-        println!();
-    }
-
-    Ok(())
+    Show(commands::show::Args),
+    /// Create a new, blank image file (no RDB yet).
+    Create(commands::create::Args),
+    /// Write a fresh, empty RDB onto an image.
+    Init(commands::init::Args),
+    /// Grow the reserved RDB area or move the first usable cylinder.
+    Adjust(commands::adjust::Args),
+    /// Rewrite the disk's geometry.
+    Remap(commands::remap::Args),
+    /// Add a partition.
+    Add(commands::add::Args),
+    /// Add a partition and copy a host image into it.
+    Addimg(commands::addimg::Args),
+    /// Change a partition's mount parameters.
+    Change(commands::change::Args),
+    /// Report unclaimed cylinder ranges.
+    Free(commands::free::Args),
+    /// Add a partition spanning every unclaimed cylinder.
+    Fill(commands::fill::Args),
+    /// Remove a partition.
+    Delete(commands::delete::Args),
+    /// Show the block-level layout of the RDB area and partitions.
+    Map(commands::map::Args),
+    /// Copy a partition's raw blocks to a host file.
+    Export(commands::export::Args),
+    /// Copy a host file into a partition's raw blocks.
+    Import(commands::import::Args),
+    /// Extract a loadable filesystem driver's binary.
+    Fsget(commands::fsget::Args),
+    /// Add a loadable filesystem driver.
+    Fsadd(commands::fsadd::Args),
+    /// Set a filesystem driver's flags.
+    Fsflags(commands::fsflags::Args),
+    /// Remove a loadable filesystem driver.
+    Fsdelete(commands::fsdelete::Args),
+    /// Walk the RDB and report structural problems.
+    Validate(commands::validate::Args),
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    let image = &cli.image;
+    let block_size = cli.block_size;
+
     match cli.command {
-        Command::Info => cmd_info(&cli),
-        Command::Show => cmd_show(&cli),
+        Command::Info(args) => commands::info::run(image, block_size, args),
+        Command::Show(args) => commands::show::run(image, block_size, args),
+        Command::Create(args) => commands::create::run(image, block_size, args),
+        Command::Init(args) => commands::init::run(image, block_size, args),
+        Command::Adjust(args) => commands::adjust::run(image, block_size, args),
+        Command::Remap(args) => commands::remap::run(image, block_size, args),
+        Command::Add(args) => commands::add::run(image, block_size, args),
+        Command::Addimg(args) => commands::addimg::run(image, block_size, args),
+        Command::Change(args) => commands::change::run(image, block_size, args),
+        Command::Free(args) => commands::free::run(image, block_size, args),
+        Command::Fill(args) => commands::fill::run(image, block_size, args),
+        Command::Delete(args) => commands::delete::run(image, block_size, args),
+        Command::Map(args) => commands::map::run(image, block_size, args),
+        Command::Export(args) => commands::export::run(image, block_size, args),
+        Command::Import(args) => commands::import::run(image, block_size, args),
+        Command::Fsget(args) => commands::fsget::run(image, block_size, args),
+        Command::Fsadd(args) => commands::fsadd::run(image, block_size, args),
+        Command::Fsflags(args) => commands::fsflags::run(image, block_size, args),
+        Command::Fsdelete(args) => commands::fsdelete::run(image, block_size, args),
+        Command::Validate(args) => commands::validate::run(image, block_size, args),
     }
 }
