@@ -61,15 +61,15 @@ pub struct Args {
     pub num_buffers: Option<u32>,
 
     /// `de_BufMemType`.
-    #[arg(long = "buf-mem-type")]
+    #[arg(long = "buf-mem-type", value_parser = parse_u32)]
     pub buf_mem_type: Option<u32>,
 
     /// `de_MaxTransfer`.
-    #[arg(long = "max-transfer")]
+    #[arg(long = "max-transfer", value_parser = parse_u32)]
     pub max_transfer: Option<u32>,
 
     /// `de_Mask`.
-    #[arg(long)]
+    #[arg(long, value_parser = parse_u32)]
     pub mask: Option<u32>,
 
     /// `de_BaudRate`.
@@ -83,6 +83,16 @@ pub struct Args {
     /// `de_BootBlocks`.
     #[arg(long = "boot-blocks")]
     pub boot_blocks: Option<u32>,
+}
+
+
+/// `u32` that accepts the notation `show` prints: `0x`-hex or decimal.
+fn parse_u32(s: &str) -> Result<u32, String> {
+    let r = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(h) => u32::from_str_radix(h, 16),
+        None => s.parse(),
+    };
+    r.map_err(|e| e.to_string())
 }
 
 pub fn run(image: &Path, block_size: usize, args: Args) -> Result<()> {

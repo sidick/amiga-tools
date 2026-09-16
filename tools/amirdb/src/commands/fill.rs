@@ -14,7 +14,6 @@ use super::free::free_ranges;
 #[derive(ClapArgs)]
 pub struct Args {
     /// `pb_DriveName`; defaults to the first free `DH`*n*.
-    #[arg(long)]
     pub name: Option<String>,
 
     /// `ofs`/`ffs[+intl][+dircache]`, `DOS0..DOS7`, `PDS3`-style, or
