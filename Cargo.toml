@@ -1,0 +1,14 @@
+[workspace]
+resolver = "2"
+members = ["tools/*"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["Simon Dick <simond@irrelevant.org>"]
+repository = "https://github.com/sidick/amiga-tools"
+
+[workspace.dependencies]
+amiga-ffs = "0.3"
+amiga-rdb = "0.4"
+amiga-rom = "0.4"
