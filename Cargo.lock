@@ -14,8 +14,7 @@ dependencies = [
 [[package]]
 name = "amiga-ffs"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2052b2bf0af9369e533931922d3e7fabf3ab0bde3e0312d7069eb306379ad948"
+source = "git+https://github.com/sidick/amiga-ffs-rs#ce75278e12274809c8262ad9fe44741759658160"
 
 [[package]]
 name = "amiga-rdb"
