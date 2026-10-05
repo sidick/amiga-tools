@@ -73,6 +73,8 @@ fn describe_encoding(encoding: Option<amiga_rom::RomEncoding>) -> String {
     match encoding {
         None => "unrecognized".to_string(),
         Some(RomEncoding::CloantoEncoded) => "Cloanto/Amiga Forever encoded".to_string(),
+        Some(RomEncoding::ReKickEncoded) => "ReKick/ReCode (\"DEADFEED\") encoded".to_string(),
+        Some(RomEncoding::KickItWrapped) => "KickIt-wrapped".to_string(),
         Some(RomEncoding::Raw(ByteOrder::Normal)) => "raw, normal byte order".to_string(),
         Some(RomEncoding::Raw(ByteOrder::Order1032)) => "raw, 1032 byte order".to_string(),
         Some(RomEncoding::Raw(ByteOrder::Order2301)) => "raw, 2301 byte order".to_string(),
