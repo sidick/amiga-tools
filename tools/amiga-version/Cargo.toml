@@ -1,0 +1,12 @@
+[package]
+name = "amiga-version"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+description = "Print version strings from Amiga hunk files"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }

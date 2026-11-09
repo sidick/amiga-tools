@@ -9,6 +9,7 @@ dedicated format crates.
 | `amidisk` | ADF/HDF volume images: create, format, list, read/write files, metadata (protect/comment/time/relabel), boot blocks, pack/unpack/repack, validate, repair, defrag, resize | [amiga-ffs](https://crates.io/crates/amiga-ffs) |
 | `amirdb` | Rigid Disk Block partition tables: create/init, partition add/change/delete/fill, export/import, filesystem drivers, block map, geometry adjust/remap, validate | [amiga-rdb](https://crates.io/crates/amiga-rdb) |
 | `amirom` | Kickstart ROM images: info, dump, diff, resident scan, normalize, patch, combine, hi/lo EPROM split & merge | [amiga-rom](https://crates.io/crates/amiga-rom) |
+| `amiga-version` | Print version strings from Amiga hunk executables and resident library tags | Standalone Rust parser |
 
 `amidisk` and `amirdb` cover the feature sets of amitools' xdftool and
 rdbtool plus extras (validation, repair, defrag, resize, links, block
@@ -23,4 +24,4 @@ commands; its module-catalog commands (`list`, `query`, `split`,
 cargo build --release
 ```
 
-Binaries land in `target/release/{amidisk,amirdb,amirom}`.
+Binaries land in `target/release/{amidisk,amirdb,amirom,amiga-version}`.

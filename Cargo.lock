@@ -29,6 +29,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0acdd5b9d456492b9077c19d052e29c77bc11fd176638b37c9dbc0a6d2258f28"
 
 [[package]]
+name = "amiga-version"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+]
+
+[[package]]
 name = "amirdb"
 version = "0.1.0"
 dependencies = [
